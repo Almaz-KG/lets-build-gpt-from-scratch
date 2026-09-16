@@ -37,15 +37,15 @@ It is not implemented here either.
 
 ## The stages
 
-Nothing here is written yet.
-What follows is the shape the work is heading towards, and the stages land one at a time.
+The bigram baseline is written and runs.
+Everything after it is the shape the work is heading towards, and the stages land one at a time.
 
 Each stage is its own runnable file that trains and samples on its own, rather than a single model that grows through git history.
 That is deliberate: the interesting comparison is between two stages, so both have to still exist.
 
 ```
-data/input.txt   Tiny Shakespeare, about 1.1 MB, the only dataset
-01_bigram.py     the baseline: an embedding table, no attention at all
+data/input.txt      Tiny Shakespeare, about 1.1 MB, the only dataset
+01_bigram.py        the baseline: an embedding table, no attention at all
 02_single_head.py   one head of self-attention, the masked-softmax core
 03_multi_head.py    heads in parallel, plus the feed-forward
 04_blocks.py        blocks, residual connections, layer norm
@@ -62,15 +62,23 @@ What will not be in his repository is the list of things I got wrong on the way 
 
 ## Running
 
-The toolchain lands with the first stage.
-It will be a standalone `uv` project, the same as every other subproject in this workspace:
+A standalone `uv` project, the same as every other subproject in this workspace:
 
 ```sh
 uv sync                      # once
 uv run python 01_bigram.py   # train a stage and sample from it
 ```
 
-`data/input.txt` is downloaded rather than committed.
+Run from the repository root, since the dataset path is relative.
+
+`data/input.txt` is not committed, and nothing fetches it automatically yet, so a fresh clone needs it first:
+
+```sh
+mkdir -p data && curl -o data/input.txt \
+  https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
+```
+
+Stage 01 takes about three seconds on cpu and reports a loss of 4.72 before training, then 2.53 on train and 2.55 on validation after 10 000 steps.
 
 ## What this is not
 
