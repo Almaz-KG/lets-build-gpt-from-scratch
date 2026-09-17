@@ -19,40 +19,84 @@ EVAL_STEPS = 100
 BATCH_SIZE = 4
 BLOCK_SIZE = 8
 
-N_EMBD = 32
-HEAD_SIZE = 32
+NUM_HEADS = 8
+NUM_EMBD = 32
+
+
+class FeedForward(nn.Module):
+    def __init__(self, n_embd: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(n_embd, n_embd), nn.ReLU())
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
 
 
 class Head(nn.Module):
-    def __init__(self, n_embd: int, head_size: int, block_size: int) -> None:
+    mask: torch.Tensor
+
+    def __init__(self, head_size: int, n_embd: int, block_size: int) -> None:
         super().__init__()
-        self.n_embd = n_embd
         self.head_size = head_size
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer("mask", torch.tril(torch.ones((block_size, block_size))))
+
+        self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
 
     def forward(self, x: Tensor) -> Tensor:
         _, T, _ = x.shape
+
         k = self.key(x)
         q = self.query(x)
-
         w = q @ k.transpose(-2, -1) * (self.head_size**-0.5)
-        w = w.masked_fill(self.mask[:T, :T] == 0, float("-inf"))  # type: ignore
+        w = w.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
         w = F.softmax(w, dim=-1)
-
         v = self.value(x)
         return w @ v
 
 
-class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size: int, n_embd: int, head_size: int) -> None:
+class MultiHeadAttention(nn.Module):
+    def __init__(
+        self, num_heads: int, head_size: int, n_embd: int, block_size: int
+    ) -> None:
+        super().__init__()
+
+        assert num_heads * head_size == n_embd, (
+            f"Embedding size {n_embd} must be equal to head size {head_size} multiplied by number of heads {num_heads}"
+        )
+
+        self.heads = nn.ModuleList(
+            [
+                Head(head_size=head_size, n_embd=n_embd, block_size=block_size)
+                for _ in range(num_heads)
+            ]
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+
+
+class MultiHeadModel(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        num_heads: int,
+        head_size: int,
+        n_embd: int,
+        block_size: int,
+    ) -> None:
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)  # (V, N)
         self.lm_head = nn.Linear(n_embd, vocab_size)
-        self.position_embedding_table = nn.Embedding(BLOCK_SIZE, n_embd)
-        self.sa_head = Head(n_embd=n_embd, head_size=head_size, block_size=BLOCK_SIZE)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.sa_heads = MultiHeadAttention(
+            num_heads=num_heads,
+            n_embd=n_embd,
+            head_size=head_size,
+            block_size=block_size,
+        )
+        self.ffwd = FeedForward(n_embd=n_embd)
 
     def forward(
         self, idx: Tensor, targets: Tensor | None = None
@@ -64,7 +108,8 @@ class BigramLanguageModel(nn.Module):
         )  # (T, C)
 
         x = tok_emb + pos_emb
-        x = self.sa_head(x)
+        x = self.sa_heads(x)
+        x = self.ffwd(x)
         logits = self.lm_head(x)  # (B, T, V)
 
         if targets is None:
@@ -111,7 +156,8 @@ class BigramLanguageModel(nn.Module):
         dataset: Tensor,
         eval_steps: int = 100,
     ) -> float:
-        # TODO: HOW TO GET THE CURRENT MODE OF THE MODULE AND RESTORE IT LATER AT THE END OF THIS FUNCTION???
+        is_training = self.training
+
         self.eval()
         losses = torch.zeros(eval_steps)
         for k in range(eval_steps):
@@ -119,7 +165,7 @@ class BigramLanguageModel(nn.Module):
             _, loss = self(x, y)
             losses[k] = loss.item()
 
-        self.train()
+        self.train(is_training)
         return losses.mean().item()
 
 
@@ -189,27 +235,32 @@ def main():
         print(f"CONTEXT: {context.tolist()}, EXPECTED PREDICTION: {target}")  # type: ignore
 
     print("=" * 20)
-    print("BIGRAM LANGUAGE MODEL")
-    m = BigramLanguageModel(
-        vocab_size=vocab_size, n_embd=N_EMBD, head_size=HEAD_SIZE
+    print("MULTI HEAD LANGUAGE MODEL")
+    m = MultiHeadModel(
+        num_heads=NUM_HEADS,
+        head_size=NUM_EMBD // NUM_HEADS,
+        n_embd=NUM_EMBD,
+        vocab_size=vocab_size,
+        block_size=BLOCK_SIZE,
     ).to(torch.device(DEVICE))
 
     xb, yb = get_batch(train_data)
 
-    b_logits, _ = m(xb, yb)
+    b_logits, loss = m(xb, yb)
     print(f"LOGITS SHAPE: {b_logits.shape}")
-    print(f"LOGITS LOSS: {m.estimate_loss(dataset=train_data, eval_steps=EVAL_STEPS)}")
+    print(f"LOGITS LOSS: {loss}")
+    print(f"EVAL LOSS: {m.estimate_loss(dataset=train_data, eval_steps=EVAL_STEPS)}")
 
     context = torch.zeros(
         (1, 1), dtype=torch.long, device=DEVICE
     )  # 0 = new line symbol
 
     b_gen = m.generate(context, new_tokens=20)[0].tolist()  # type: ignore
-    print(f"BIGRAM GENERATION BEFORE TRAINING: {decode(b_gen)}")
+    print(f"GENERATION BEFORE TRAINING: {decode(b_gen)}")
 
     m.train_(dataset=train_data, learning_steps=LEARNING_STEPS)  # type: ignore
     b_gen2 = m.generate(context, new_tokens=100)[0].tolist()  # type: ignore
-    print(f"BIGRAM GENERATION AFTER TRAINING: {decode(b_gen2)}")
+    print(f"GENERATION AFTER TRAINING: {decode(b_gen2)}")
     training_loss = m.estimate_loss(dataset=train_data)
 
     val_loss = m.estimate_loss(dataset=val_data)
