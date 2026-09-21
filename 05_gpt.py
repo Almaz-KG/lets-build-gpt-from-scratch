@@ -7,19 +7,29 @@ torch.manual_seed(1337)  # type: ignore
 
 INPUT_FILE_PATH = "data/input.txt"
 
-DEVICE = "cpu"
+DEVICE = "mps"
 
-LEARNING_STEPS = 10_000
+LEARNING_STEPS = 5_000
+# LEARNING_RATE = 3e-4
 LEARNING_RATE = 1e-3
 
 EVAL_STEPS = 100
 
-BATCH_SIZE = 4
-BLOCK_SIZE = 8
+# BATCH_SIZE = 64
+# BLOCK_SIZE = 256
 
-NUM_LAYERS = 3
-NUM_HEADS = 8
-NUM_EMBD = 32
+BATCH_SIZE = 32
+BLOCK_SIZE = 64
+
+# NUM_LAYERS = 6
+# NUM_HEADS = 6
+# NUM_EMBD = 384
+
+NUM_EMBD = 128
+NUM_HEADS = 4
+NUM_LAYERS = 4
+
+DROPOUT = 0.1
 
 
 class FeedForward(nn.Module):
@@ -29,6 +39,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(p=DROPOUT),
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -46,6 +57,7 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
 
         self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(p=DROPOUT)
 
     def forward(self, x: Tensor) -> Tensor:
         _, T, _ = x.shape
@@ -55,6 +67,7 @@ class Head(nn.Module):
         w = q @ k.transpose(-2, -1) * (self.head_size**-0.5)
         w = w.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
         w = F.softmax(w, dim=-1)
+        w = self.dropout(w)
         v = self.value(x)
         return w @ v
 
@@ -76,10 +89,12 @@ class MultiHeadAttention(nn.Module):
             ]
         )
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(p=DROPOUT)
 
     def forward(self, x: Tensor) -> Tensor:
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.proj(out)
+        out = self.dropout(out)
         return out
 
 
@@ -252,14 +267,6 @@ def main():
     print("=" * 20)
     print("BLOCK SIZE")
     print(f"BATCH EXAMPLE: {train_data[: BLOCK_SIZE + 1]}")
-
-    x = train_data[:BLOCK_SIZE]
-    y = train_data[1 : BLOCK_SIZE + 1]
-
-    for t in range(BLOCK_SIZE):
-        context = x[: t + 1]
-        target = y[t]
-        print(f"CONTEXT: {context.tolist()}, EXPECTED PREDICTION: {target}")  # type: ignore
 
     print("=" * 20)
     print("MULTI HEAD LANGUAGE MODEL")

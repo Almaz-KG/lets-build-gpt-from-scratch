@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
@@ -7,19 +9,21 @@ torch.manual_seed(1337)  # type: ignore
 
 INPUT_FILE_PATH = "data/input.txt"
 
-DEVICE = "cpu"
+DEVICE = os.environ.get("DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
 
-LEARNING_STEPS = 10_000
-LEARNING_RATE = 1e-3
+LEARNING_STEPS = 5_000
+LEARNING_RATE = 3e-4
 
 EVAL_STEPS = 100
 
-BATCH_SIZE = 4
-BLOCK_SIZE = 8
+BATCH_SIZE = 64
+BLOCK_SIZE = 256
 
-NUM_LAYERS = 3
-NUM_HEADS = 8
-NUM_EMBD = 32
+NUM_LAYERS = 6
+NUM_HEADS = 6
+NUM_EMBD = 384
+
+DROPOUT = 0.2
 
 
 class FeedForward(nn.Module):
@@ -29,6 +33,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(p=DROPOUT),
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -46,6 +51,7 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
 
         self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(p=DROPOUT)
 
     def forward(self, x: Tensor) -> Tensor:
         _, T, _ = x.shape
@@ -55,6 +61,7 @@ class Head(nn.Module):
         w = q @ k.transpose(-2, -1) * (self.head_size**-0.5)
         w = w.masked_fill(self.mask[:T, :T] == 0, float("-inf"))
         w = F.softmax(w, dim=-1)
+        w = self.dropout(w)
         v = self.value(x)
         return w @ v
 
@@ -76,10 +83,12 @@ class MultiHeadAttention(nn.Module):
             ]
         )
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(p=DROPOUT)
 
     def forward(self, x: Tensor) -> Tensor:
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.proj(out)
+        out = self.dropout(out)
         return out
 
 
@@ -160,6 +169,7 @@ class MultiHeadModel(nn.Module):
     def train_(
         self,
         dataset: Tensor,
+        val_dataset: Tensor,
         learning_rate: float = LEARNING_RATE,
         learning_steps: int = LEARNING_STEPS,
     ) -> None:
@@ -174,8 +184,9 @@ class MultiHeadModel(nn.Module):
             optimizer.step()  # type: ignore
 
             if i % 500 == 0:
-                el = self.estimate_loss(dataset=dataset, eval_steps=EVAL_STEPS)
-                print(f"step: {i}, loss: {el:.4f}")
+                tr = self.estimate_loss(dataset=dataset, eval_steps=EVAL_STEPS)
+                va = self.estimate_loss(dataset=val_dataset, eval_steps=EVAL_STEPS)
+                print(f"step: {i}, train: {tr:.4f}, val: {va:.4f}, gap: {va - tr:+.4f}")
 
     @torch.no_grad()
     def estimate_loss(
@@ -197,7 +208,6 @@ class MultiHeadModel(nn.Module):
 
 
 def get_batch(data: Tensor) -> tuple[Tensor, Tensor]:
-    # TODO: DEEP DIVE AND EXAMINE TO GET FULL UNDERSTANDING WHAT IS HAPPENING IN THE LINE BELOW
     ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,))
     x = torch.stack([data[i : i + BLOCK_SIZE] for i in ix]).to(DEVICE)
     y = torch.stack([data[i + 1 : i + BLOCK_SIZE + 1] for i in ix]).to(DEVICE)
@@ -253,14 +263,6 @@ def main():
     print("BLOCK SIZE")
     print(f"BATCH EXAMPLE: {train_data[: BLOCK_SIZE + 1]}")
 
-    x = train_data[:BLOCK_SIZE]
-    y = train_data[1 : BLOCK_SIZE + 1]
-
-    for t in range(BLOCK_SIZE):
-        context = x[: t + 1]
-        target = y[t]
-        print(f"CONTEXT: {context.tolist()}, EXPECTED PREDICTION: {target}")  # type: ignore
-
     print("=" * 20)
     print("MULTI HEAD LANGUAGE MODEL")
     m = MultiHeadModel(
@@ -285,7 +287,7 @@ def main():
     b_gen = m.generate(context, new_tokens=20)[0].tolist()  # type: ignore
     print(f"GENERATION BEFORE TRAINING: {decode(b_gen)}")
 
-    m.train_(dataset=train_data, learning_steps=LEARNING_STEPS)  # type: ignore
+    m.train_(dataset=train_data, val_dataset=val_data, learning_steps=LEARNING_STEPS)  # type: ignore
     b_gen2 = m.generate(context, new_tokens=100)[0].tolist()  # type: ignore
     print(f"GENERATION AFTER TRAINING: {decode(b_gen2)}")
     training_loss = m.estimate_loss(dataset=train_data)
@@ -294,6 +296,18 @@ def main():
 
     print(f"TRAINING LOSS: {training_loss:.2f}")
     print(f"VALIDATION LOSS: {val_loss:.2f}")
+    torch.save(
+        {
+            "state_dict": m.state_dict(),
+            "chars": chars,
+            "config": {
+                "n_embd": NUM_EMBD, "num_heads": NUM_HEADS, "n_layer": NUM_LAYERS,
+                "block_size": BLOCK_SIZE, "dropout": DROPOUT, "vocab_size": vocab_size,
+            },
+            "losses": {"train": training_loss, "val": val_loss},
+        },
+        "checkpoints/05_gpt.pt",
+    )
 
 
 if __name__ == "__main__":
