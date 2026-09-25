@@ -5,9 +5,11 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 torch.manual_seed(1337)  # type: ignore
+torch.set_float32_matmul_precision("high")
 
 
 INPUT_FILE_PATH = "data/input.txt"
+CHECKPOINT_FILE_PATH = "checkpoints/05_gpt.pt"
 
 DEVICE = os.environ.get("DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -296,6 +298,7 @@ def main():
 
     print(f"TRAINING LOSS: {training_loss:.2f}")
     print(f"VALIDATION LOSS: {val_loss:.2f}")
+    os.makedirs(os.path.dirname(CHECKPOINT_FILE_PATH), exist_ok=True)
     torch.save(
         {
             "state_dict": m.state_dict(),
@@ -306,7 +309,7 @@ def main():
             },
             "losses": {"train": training_loss, "val": val_loss},
         },
-        "checkpoints/05_gpt.pt",
+        CHECKPOINT_FILE_PATH,
     )
 
 
